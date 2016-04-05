@@ -4,7 +4,12 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="Bacula",
-    version="0.1",
+    name="bacula",
+    version="0.2",
     packages=find_packages(),
+    entry_points={
+        'console_scripts': [
+            'bacula = bacula.main:bacula_cmd',
+        ]
+    },
 )
