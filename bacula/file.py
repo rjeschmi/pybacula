@@ -7,18 +7,23 @@ import argparse
 import base64
 import hashlib
 import logging
+import pprint
+from collections import Counter
 from bacula.db.schema import Schema, File, FileName, Path, Job
+from bacula.exceptions import PyBaculaException,FileNotFound
 
-schema = Schema()
-session = schema.get_session()
 verbose = False
+quiet = False
 log = logging.getLogger(__name__)
+pp = pprint.PrettyPrinter(indent=4)
 
 class JobCache():
     """Implements a basic cache to speed up md5 comparisons"""
        
-    def __init__(self):
+    def __init__(self, config):
         self.cache = {}
+        self.schema = Schema(config)
+        self.session = self.schema.get_session()
 
     def get_md5(self, md5):
         hits = []
@@ -43,7 +48,7 @@ class JobCache():
                 self.cache[job]={}
                 uncached_jobs.append(job)
 
-        FileNameSession=session.query(File).\
+        FileNameSession=self.session.query(File).\
             join(Path).\
             join(FileName).\
             join(Job).\
@@ -55,12 +60,23 @@ class JobCache():
             self.cache[file.jobid][file.md5]=file
 
 
-cache = JobCache()
 
-def get_files_by_md5(md5, format="md5sum", use_cache=False, path=None):
+class FileCMD():
+
+  def __init__(self, config):
+    self.schema = Schema(config)
+    self.session = self.schema.get_session()
+    self.cache = JobCache(config)
+    self.stats = { 
+        'jobs': Counter(),
+        'found': 0,
+        'notfound': Counter(),
+    }
+
+  def get_files_by_md5(self, md5, format="md5sum", use_cache=False, path=None):
     #print "trying to find: %s" % md5
     if os.path.isfile(md5):
-        md5_hex=generate_file_md5(md5)
+        md5_hex=self.generate_file_md5(md5)
     else:
         md5_hex=md5
     md5_decoded = md5_hex.decode('hex')
@@ -70,14 +86,14 @@ def get_files_by_md5(md5, format="md5sum", use_cache=False, path=None):
     log.debug("got use_cache: %s", use_cache)
     if use_cache:
         #This will only be sure to get at least one job
-        cache_hits = cache.get_md5(md5_base64) 
+        cache_hits = self.cache.get_md5(md5_base64) 
         if cache_hits is not None:
             log.debug("cache hit for md5: %s", md5)
             files = cache_hits
         
         else:
             log.debug("cache miss for md5: %s", md5)
-            files = session.query(File).filter(File.md5 == md5_base64).all()
+            files = self.session.query(File).filter(File.md5 == md5_base64).all()
             jobs = []
             if len(files)==0 :
                 print "This file is not in the database %s, %s" % (md5, path)
@@ -91,19 +107,23 @@ def get_files_by_md5(md5, format="md5sum", use_cache=False, path=None):
 
     else: 
         log.debug("not using cache")
-        files = session.query(File).filter(File.md5 == md5_base64).all()
+        log.debug("session: %s" % self.session)
+        files = self.session.query(File).filter(File.md5 == md5_base64).all()
         log.debug("got files: %s", len(files))
-    if len(files) > 0 and verbose:
+    if len(files) > 0 :
         for file in files:
-            print "found id: %s" % file.fileid
-            print "file %s" % file
-            print "filename: %s path: %s" % (file.filename.name, file.path.path)
-            print "job: %s name: %s" % (file.jobid, file.job.name)
-    elif files is None:
-        print "Can't find file in database"
+            self.stats['jobs'][file.jobid]+=1
+            if not quiet: 
+                print "found id: %s filename: %s path: %s" % (file.fileid, file.filename.name, file.path.path)
+                #print "file %s" % file
+                print "\tjob: %s name: %s poolid: %s pool: %s" % (file.jobid, file.job.name, file.job.pool.poolid, file.job.pool.name)
+    else:
+        print "Can't find file in database with md5: %s" % md5_base64
+        return None
 
-def generate_file_md5(filename, blocksize=2**20):
+  def generate_file_md5(self,filename, blocksize=2**20):
     m = hashlib.md5()
+    log.debug("opening file: %s", filename)
     with open( filename , "rb" ) as f:
         while True:
             buf = f.read(blocksize)
@@ -112,13 +132,13 @@ def generate_file_md5(filename, blocksize=2**20):
             m.update( buf )
     return m.hexdigest()
 
-def get_files_by_name(name):
-    filenames = session.query(FileName).filter(FileName.name == name).all()
+  def get_files_by_name(self, name):
+    filenames = self.session.query(FileName).filter(FileName.name == name).all()
     files = [ file for filename in filenames for file in filename.files ]
 
-    print_files(files)
+    self.print_files(files)
 
-def get_files_by_hashdeep(filename):
+  def get_files_by_hashdeep(self, filename):
     """iterate through a hashdeep file and search by md5"""
     with open( filename) as fh:
         for line in fh:
@@ -130,23 +150,28 @@ def get_files_by_hashdeep(filename):
                 hashfields = line.split(',')
                 get_files_by_md5(hashfields[1], path=hashfields[3])
 
-def get_files_by_md5sum(filename, use_cache=False):
+  def get_files_by_md5sum(self, filename, use_cache=False):
     """iterate through a md5sum file and search by md5"""
     with open( filename) as fh:
         for line in fh:
+            m = re.match('(^[a-z0-9]{32})\s+(.*)$', line)
             if line[0] == '%':
                 pass
             elif line[0] == '#' or line[0] == " ":
                 pass
-            elif re.match('^[a-z0-9]{32}', line):
-                hashfields = line.split(' ')
+            elif m:
                 log.debug("got line: %s", line)
-                log.debug("calling get file by md5, use_cache: %s, path: %s", use_cache, hashfields[1])
-                get_files_by_md5(hashfields[0], use_cache=use_cache, path=hashfields[1])
+                log.debug("calling get file by md5, use_cache: %s, path: %s", use_cache, m.group(2))
+                try:
+                    self.get_files_by_md5(m.group(1), use_cache=use_cache, path=m.group(2))
+                except FileNotFound:
+                    self.stats['notfound'].update([m.group(2)])
             else:
                 print "didn't match line: %s" % line
+        print "notfound: "
+        pp.pprint( self.stats['notfound'])
 
-def print_files(files):
+  def print_files(self, files):
     for file in files:
         print "found id: %s" % file.fileid
         print "file %s" % file
@@ -154,23 +179,28 @@ def print_files(files):
         print "job: %s name: %s" % (file.jobid, file.job.name)
 
 
-def call_find(args):
+def call_find(args, config=False):
     """The find caller"""
     log.info("call_find")
-    global verbose
+    global verbose, quiet
     if args.verbose == True:
         log.debug("found verbose args: %s", args)
         verbose = True
+    if args.quiet == True:
+        quiet = True
+    file = FileCMD(config)
     for filename in args.filenames:
         if args.type == "name":
-            get_files_by_name(filename)
+            file.get_files_by_name(filename)
         elif args.type == "md5":
             log.debug("calling get files by md5 cache: %s", args.cache)
-            get_files_by_md5(filename, use_cache=args.cache)
+            result = file.get_files_by_md5(filename, use_cache=args.cache)
+            if result is None:
+                print "Couldn't find %s in database" % filename
         elif args.type == "hashdeep":
-            get_files_by_hashdeep(filename)
+            file.get_files_by_hashdeep(filename)
         elif args.type == "md5sum":
-            get_files_by_md5sum(filename, use_cache=args.cache)
+            file.get_files_by_md5sum(filename, use_cache=args.cache)
         else:
             print "sorry don't know that query yet: %s" % filename
 
