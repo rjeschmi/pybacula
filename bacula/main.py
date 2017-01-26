@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 logger.debug("Logger set")
 
 
-MODULES = [ '.file' ]
+MODULES = [ '.file','.modules.volumes', '.modules.jobs', '.modules.archive' ]
 
 def bacula_cmd():
     args = sys.argv[1:]

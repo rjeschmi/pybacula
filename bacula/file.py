@@ -15,7 +15,7 @@ from bacula.exceptions import PyBaculaException,FileNotFound
 verbose = False
 quiet = False
 log = logging.getLogger(__name__)
-pp = pprint.PrettyPrinter(indent=4)
+pp = pprint.PrettyPrinter(indent=4, width=80)
 
 class JobCache():
     """Implements a basic cache to speed up md5 comparisons"""
@@ -97,6 +97,7 @@ class FileCMD():
             jobs = []
             if len(files)==0 :
                 print "This file is not in the database %s, %s" % (md5, path)
+                raise FileNotFound(md5)
             else:
                 for file in files:
                     jobs.append(file.jobid)
@@ -119,7 +120,7 @@ class FileCMD():
                 print "\tjob: %s name: %s poolid: %s pool: %s" % (file.jobid, file.job.name, file.job.pool.poolid, file.job.pool.name)
     else:
         print "Can't find file in database with md5: %s" % md5_base64
-        return None
+        raise FileNotFound(md5)
 
   def generate_file_md5(self,filename, blocksize=2**20):
     m = hashlib.md5()
@@ -169,7 +170,7 @@ class FileCMD():
             else:
                 print "didn't match line: %s" % line
         print "notfound: "
-        pp.pprint( self.stats['notfound'])
+        pp.pprint( self.stats['notfound'].most_common())
 
   def print_files(self, files):
     for file in files:
